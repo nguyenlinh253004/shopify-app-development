@@ -1,0 +1,36 @@
+# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
+
+client_id = "145fa399350bc3feee247dddcffee1b1"
+name = "product-promotion-stock"
+handle = "product-promotion-stock-1"
+application_url = "https://settle-quotations-headers-pleasure.trycloudflare.com"
+embedded = true
+
+[build]
+include_config_on_deploy = true
+automatically_update_urls_on_dev = true
+
+[webhooks]
+api_version = "2025-04"
+
+  [[webhooks.subscriptions]]
+  topics = [ "app/uninstalled" ]
+  uri = "/webhooks/app/uninstalled"
+
+  [[webhooks.subscriptions]]
+  topics = [ "app/scopes_update" ]
+  uri = "/webhooks/app/scopes_update"
+
+[access_scopes]
+# Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
+scopes = "write_products,read_products,read_inventory,write_inventory,read_locations"
+
+[auth]
+redirect_urls = [
+  "https://settle-quotations-headers-pleasure.trycloudflare.com/auth/callback",
+  "https://settle-quotations-headers-pleasure.trycloudflare.com/auth/shopify/callback",
+  "https://settle-quotations-headers-pleasure.trycloudflare.com/api/auth/callback"
+]
+
+[pos]
+embedded = false
