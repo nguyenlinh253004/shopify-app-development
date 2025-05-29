@@ -1,0 +1,7 @@
+-- CreateTable
+CREATE TABLE "ProductDeleteLog" (
+    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    "productId" TEXT NOT NULL,
+    "deletedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "error" TEXT
+);

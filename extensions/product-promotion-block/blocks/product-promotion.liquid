@@ -1,0 +1,161 @@
+{% schema %}
+{
+  "name": "Product Promotion",
+  "target": "section",
+  "settings": [
+    {
+      "type": "product",
+      "id": "product",
+      "label": "Select Product"
+    }
+  ]
+}
+{% endschema %}
+
+<div id="product-promotion" class="product-promotion-container">
+  <div class="price-info">
+    <p class="original-price">Giá gốc: <span>{{ product.price | money }}</span></p>
+    <p class="promotion-price">Giá khuyến mãi: <span id="promotion-price">Đang tải...</span></p>
+    <p class="inventory-info">Còn <span id="inventory">Đang tải...</span> sản phẩm trong kho</p>
+  </div>
+  <button onclick="fetchDynamicData()" class="update-button">
+    <span class="button-text">Cập nhật dữ liệu</span>
+    <span class="loading-spinner" style="display: none;">⏳</span>
+  </button>
+</div>
+
+<style>
+  .product-promotion-container {
+    background-color: #f9fafb;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    padding: 16px;
+    max-width: 400px;
+    margin: 16px auto;
+    text-align: center;
+    font-family: 'Helvetica', 'Arial', sans-serif;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+  }
+
+  .price-info {
+    margin-bottom: 16px;
+  }
+
+  .original-price,
+  .promotion-price,
+  .inventory-info {
+    margin: 8px 0;
+    font-size: 16px;
+    color: #1f2a44;
+  }
+
+  .original-price span {
+    font-weight: 600;
+    color: #6b7280;
+  }
+
+  .promotion-price span {
+    font-weight: 600;
+    color: #e02424;
+  }
+
+  .inventory-info span {
+    font-weight: 600;
+    color: #2d6a4f;
+  }
+ 
+  .update-button {
+    background-color: #2d6a4f;
+    color: #ffffff;
+    border: none;
+    border-radius: 4px;
+    padding: 10px 16px;
+    font-size: 14px;
+    cursor: pointer;
+    transition: background-color 0.3s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+  }
+
+  .update-button:hover {
+    background-color: #386641;
+  }
+
+  .update-button:active {
+    background-color: #244c37;
+  }
+  .loading-spinner {
+    font-size: 14px;
+  }
+
+  @media (max-width: 600px) {
+    .product-promotion-container {
+      max-width: 100%;
+      padding: 12px;
+    }
+
+    .original-price,
+    .promotion-price,
+    .inventory-info {
+      font-size: 14px;
+    }
+
+    .update-button {
+      width: 100%;
+      padding: 12px;
+    }
+  }
+</style>
+
+<script>
+  function fetchDynamicData() {
+    const productId = '{{ product.id }}';
+    const button = document.querySelector('.update-button');
+    const buttonText = document.querySelector('.button-text');
+    const spinner = document.querySelector('.loading-spinner');
+    const shop = 'quang-linh-ngh-an.myshopify.com';
+    const apiSecret = 'YOUR_SHOPIFY_API_SECRET'; // WARNING: Exposing this in client-side code is insecure!
+    const body = ''; // For GET requests, body is empty
+   
+    // Cập nhật trạng thái nút khi bắt đầu gọi API
+    if (button && buttonText && spinner) {
+      button.disabled = true;
+      buttonText.style.display = 'none';
+      spinner.style.display = 'inline';
+    }
+
+    fetch('https://positive-moderate-environmental-blocking.trycloudflare.com/api/product-promotion?productId=' + productId, {
+    method: 'GET',
+    headers: {
+      'Content-Type': 'application/json',
+  
+    },
+  })
+      .then(res => {
+        if (!res.ok) {
+          throw new Error('Network response was not ok: ' + res.status);
+        }
+        return res.json();
+      })
+      .then(data => {
+        document.getElementById('promotion-price').innerText = data.promotionPrice || 'Chưa có';
+        document.getElementById('inventory').innerText = data.inventory || '0';
+      })
+      .catch(err => {
+        console.error('Error:', err);
+        document.getElementById('promotion-price').innerText = 'Lỗi';
+        document.getElementById('inventory').innerText = 'Lỗi';
+      })
+      .finally(() => {
+        // Khôi phục trạng thái nút sau khi API hoàn tất
+        if (button && buttonText && spinner) {
+          button.disabled = false;
+          buttonText.style.display = 'inline';
+          spinner.style.display = 'none';
+        }
+      });
+  }
+  fetchDynamicData();
+</script>

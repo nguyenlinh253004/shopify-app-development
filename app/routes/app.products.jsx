@@ -1,12 +1,22 @@
 import { Card } from '@shopify/polaris';
 import { json } from '@remix-run/node';
-import { useActionData, useLoaderData } from '@remix-run/react';
+import {  useActionData, useLoaderData } from '@remix-run/react';
 import { authenticate } from '../shopify.server';
 import { ProductsTable } from '../components/ProductsTable';
-
+// import {authenticateToken} from '../middleware/checkToken'
 export async function loader({ request }) {
-  const { admin } = await authenticate.admin(request);
-
+  // throw new Error('Lỗi test từ loader'); 
+//  const token=   await authenticateToken(request);
+//    if(!token){
+//      console.log("lỗi thiếu accesstoken");
+//    }
+  const { admin,session } = await authenticate.admin(request);
+  console.log(session)
+     const {shop,accessToken} = session;
+     if (!shop || !accessToken) {
+       console.log("lỗi thiếu accesstoken");
+      throw new Error('Phiên không hợp lệ: Thiếu shop hoặc accessToken');
+    }
   const response = await admin.graphql(
     `#graphql
     query($first: Int, $sortKey: ProductSortKeys, $reverse: Boolean) {

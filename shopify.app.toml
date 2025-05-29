@@ -3,7 +3,7 @@
 client_id = "145fa399350bc3feee247dddcffee1b1"
 name = "product-promotion-stock"
 handle = "product-promotion-stock-1"
-application_url = "https://settle-quotations-headers-pleasure.trycloudflare.com"
+application_url = "https://tremendous-handhelds-discusses-colorado.trycloudflare.com"
 embedded = true
 
 [build]
@@ -18,6 +18,10 @@ api_version = "2025-04"
   uri = "/webhooks/app/uninstalled"
 
   [[webhooks.subscriptions]]
+  topics = [ "products/delete" ]
+  uri = "/webhooks/app/products-delete"
+
+  [[webhooks.subscriptions]]
   topics = [ "app/scopes_update" ]
   uri = "/webhooks/app/scopes_update"
 
@@ -27,9 +31,9 @@ scopes = "write_products,read_products,read_inventory,write_inventory,read_locat
 
 [auth]
 redirect_urls = [
-  "https://settle-quotations-headers-pleasure.trycloudflare.com/auth/callback",
-  "https://settle-quotations-headers-pleasure.trycloudflare.com/auth/shopify/callback",
-  "https://settle-quotations-headers-pleasure.trycloudflare.com/api/auth/callback"
+  "https://tremendous-handhelds-discusses-colorado.trycloudflare.com/auth/callback",
+  "https://tremendous-handhelds-discusses-colorado.trycloudflare.com/auth/shopify/callback",
+  "https://tremendous-handhelds-discusses-colorado.trycloudflare.com/api/auth/callback"
 ]
 
 [pos]

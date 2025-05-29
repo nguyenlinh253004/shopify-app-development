@@ -7,6 +7,7 @@ import { useEffect } from 'react';
 // import {  NoteIcon } from '@shopify/polaris-icons';
 
 export async function loader({ request, params }) {
+  
   const { admin } = await authenticate.admin(request);
   const { id } = params;
 
@@ -25,6 +26,7 @@ export async function loader({ request, params }) {
             url
             altText
           }
+          
           priceRange {
             minVariantPrice {
               amount
@@ -36,17 +38,63 @@ export async function loader({ request, params }) {
             }
           }
           totalInventory
-          variants(first: 10) {
+          variants(first: 250) {
             edges {
               node {
                 id
-                inventoryItem {
-                  id
+                selectedOptions {
+                  name
+                  value
                 }
+              media(first: 10) {
+                      edges {
+                        node {
+                          mediaContentType
+                          alt
+                          ... on MediaImage {
+                            image {
+                              url
+                            }
+                          }
+                        }
+                      }
+                    }
+                createdAt
+                updatedAt
+                inventoryItem {
+                  id   
+                  inventoryLevels(first: 10) {
+                    edges {
+                      node {
+                        id   
+                         quantities(names: ["available", "incoming", "committed", "damaged", "on_hand", "quality_control", "reserved", "safety_stock"]) {
+                          name
+                          quantity
+                        }          
+                        location {
+                          id
+                          name
+                        }
+                      }
+                    }
+                  }
+                }
+              
                 title
                 price
                 inventoryQuantity
                 sku
+              }
+            }
+          }
+          metafields(first: 10) {
+            edges {
+              node {
+                id    
+                namespace
+                key
+                value
+                type
               }
             }
           }
@@ -58,11 +106,15 @@ export async function loader({ request, params }) {
     );
 
     const { data, errors } = await response.json();
-
+  // Xử lý metafields thành object dễ sử dụng
+    const metafields = data.product.metafields.edges.reduce((acc, edge) => {
+      acc[edge.node.key] = edge.node.value;
+      return acc;
+    }, {});
     if (errors) throw new Error(errors.map((e) => e.message).join(', '));
     if (!data.product) throw new Error('Product not found');
 
-    return json({ product: data.product });
+    return json({ product: data.product, metafields });
   } catch (error) {
     console.error('Product detail error:', error);
     return json({ error: error.message }, { status: 500 });
@@ -73,22 +125,52 @@ export async function loader({ request, params }) {
   const { admin } = await authenticate.admin(request);
   const formData = await request.formData();
   const variantId = formData.get('variantId');
-  const variantItemId = formData.get('variantItemId');
+  // const variantId = formData.get('variantId');
+  const variantItemId =formData.get("variantItemId");
   const price = formData.get('price');
   const inventory = formData.get('inventory');
+  // console.log(variantItemId)
+
+
  const inventoryQuantity = formData.get('inventoryQuantity');
+ const location = formData.get('location');
+//  const inventorylevel = formData.get('inventorylevel');
+
+
+
+
+  // Lấy tất cả các trường metafield từ form
+  const metafields = {};
+  for (let [key, value] of formData.entries()) {
+    if (key.startsWith('metafield_')) {
+      const metafieldKey = key.replace('metafield_', '');
+      metafields[metafieldKey] = value;
+    }
+  }
 
   try {
     // Validate input
-    if (!variantId || !price || !inventory) {
+    if (!variantId || !price || !inventory || !variantItemId || !inventoryQuantity ||!location  ) {
       throw new Error('Missing required fields');
     }
     
     if (isNaN(parseFloat(price))){
       throw new Error('Price must be a number');
     }
+    if(isNaN(variantItemId.split('/').pop())){
+       throw new Error('inventoryItemId không đúng');
+    }
+    if(isNaN(variantId.split('/').pop())){
+       throw new Error('variantId không đúng');
+    }
+    if(isNaN(location.split('/').pop())){
+       throw new Error('location không đúng');
+    }
+    // if (isNaN(variantItemId) || isNaN(parseInt(inventoryQuantity))||isNaN(location)){
+    //   throw new Error('lỗi');
+    // }
     
-    if (isNaN(parseInt(inventory))){ 
+    if (isNaN(parseInt(inventory)) || parseInt(inventory)  !== parseFloat(inventory)) { 
       throw new Error('Inventory must be a whole number and Integer');
     }
 
@@ -123,52 +205,6 @@ export async function loader({ request, params }) {
 
   }
 );
-    // Get inventoryItemId and locationId
-    // const variantData = await admin.graphql(
-    //   `#graphql
-    //   query($variantId: ID!) {
-    //     productVariant(id: $variantId) {
-    //       id
-    //       inventoryItem {
-    //         id
-    //         inventoryLevels(first: 10) {
-    //           edges {
-    //             node {
-    //               id
-    //               quantities(names: ["available"]) {
-    //                 name
-    //                 quantity
-    //               }
-    //               location {
-    //                 id
-    //                 name
-    //               }
-    //             }
-    //           }
-    //         }
-    //       }
-    //     }
-    //   }`,
-    //   {
-    //     variables: {
-    //       variantId: `gid://shopify/ProductVariant/${variantId.split('/').pop()}`,
-    //     },
-    //   }
-    // );
-
-    // const variantResult = await variantData.json();
-    // if (variantResult.errors) {
-    //   throw new Error('GraphQL variant query failed: ' + JSON.stringify(variantResult.errors));
-    // }
-    //     const inventoryItemId = variantResult.data?.productVariant?.inventoryItem?.id;
-    //     const locationId =
-    //       variantResult.data?.productVariant?.inventoryItem?.inventoryLevels?.edges[0]?.node?.location?.id;
-
-    //     if (!inventoryItemId || !locationId) {
-    //       throw new Error('No inventoryItemId or locationId found');
-    //     }
-    //     console.log('Inventory Item ID:', inventoryItemId);
-    //     console.log('Location ID:', locationId);
         // Step 3: Update inventory
         const inventoryUpdate = await admin.graphql(
           `#graphql
@@ -194,10 +230,10 @@ export async function loader({ request, params }) {
                 name: "available",
                 reason: "correction",
                 // referenceDocumentUri: "logistics://custom-adjustment/script/manual-update",
-                          quantities: [
+                quantities: [
                 {
                   inventoryItemId: `gid://shopify/InventoryItem/${variantItemId.split('/').pop()}`,
-                  locationId: "gid://shopify/Location/106030006592",
+                  locationId: `gid://shopify/Location/${location.split('/').pop()}`, // Use provided location or default to first location
                   quantity: parseInt(inventory),
                   compareQuantity: parseInt(inventoryQuantity) || 0, // Use provided inventoryQuantity or default to 0
                 }
@@ -220,7 +256,7 @@ export async function loader({ request, params }) {
       throw new Error('Failed to update product');
     }
 
-    return json({ success: true });
+    return json({ success: true  });
   } catch (error) {
     console.error('Update error:', error);
     return json({ error: error.message }, { status: 500 });
@@ -229,13 +265,8 @@ export async function loader({ request, params }) {
 export default function ProductDetail() {
   const { product, error } = useLoaderData();
   const actionData = useActionData();
-   useEffect(() => {
-   product && console.log('Product loaded:', product);
-    if (error) {
-      console.error('Error loading product:', error);
-    }
-   }, [product]);
-
+  // console.log('Action data:', product.metafields.edges.map((edge) => edge.node));
+//  console.log(product.featuredImage.url.length)
   return (
     <div>
       {error ? (

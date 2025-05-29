@@ -1,371 +1,1122 @@
-# Shopify App Template - Remix
+## Tuần 7 & Tuần 8: Project - Shopify App Hoàn chỉnh
 
-This is a template for building a [Shopify app](https://shopify.dev/docs/apps/getting-started) using the [Remix](https://remix.run) framework.
+### Xây dựng Shopify App - "Product Promotion & Stock Manager"
 
-Rather than cloning this repo, you can use your preferred package manager and the Shopify CLI with [these steps](https://shopify.dev/docs/apps/getting-started/create).
+**Mục tiêu:**  
+Xây dựng một Shopify Embedded App với các chức năng:
 
-Visit the [`shopify.dev` documentation](https://shopify.dev/docs/api/shopify-app-remix) for more details on the Remix app package.
+- Hiển thị danh sách sản phẩm từ Shopify
+- Cập nhật thông tin sản phẩm (giá khuyến mãi / tồn kho)
+- Tương tác với Shopify Theme (App Block / ScriptTag)
+- Trang Dashboard sử dụng Polaris
+- Xử lý Webhook khi sản phẩm bị xoá
+- Validate input, handle error
+- Chức năng OAuth đầy đủ
 
-## Quick start
+---
 
-### Prerequisites
+### ✅ Chức năng yêu cầu
 
-Before you begin, you'll need the following:
+#### 1. Authentication & OAuth
 
-1. **Node.js**: [Download and install](https://nodejs.org/en/download/) it if you haven't already.
-2. **Shopify Partner Account**: [Create an account](https://partners.shopify.com/signup) if you don't have one.
-3. **Test Store**: Set up either a [development store](https://help.shopify.com/en/partners/dashboard/development-stores#create-a-development-store) or a [Shopify Plus sandbox store](https://help.shopify.com/en/partners/dashboard/managing-stores/plus-sandbox-store) for testing your app.
+**Triển khai OAuth chuẩn với Shopify**
 
-### Setup
+- Sử dụng package `@shopify/shopify-app-remix` để thiết lập OAuth flow.
+- Lưu session/token vào database (SQLite/MySQL với Prisma).
+- Tất cả API đều dùng middleware kiểm tra token hợp lệ.
 
-If you used the CLI to create the template, you can skip this section.
+**Ví dụ cấu hình:**
 
-Using yarn:
+```ts
+import "@shopify/shopify-app-remix/adapters/node";
+import {
+  ApiVersion,
+  AppDistribution,
+  shopifyApp,
+} from "@shopify/shopify-app-remix/server";
+import { PrismaSessionStorage } from "@shopify/shopify-app-session-storage-prisma";
+import prisma from "./db.server";
 
-```shell
-yarn install
+const shopify = shopifyApp({
+  apiKey: process.env.SHOPIFY_API_KEY,
+  apiSecretKey: process.env.SHOPIFY_API_SECRET || "",
+  apiVersion: ApiVersion.January25,
+  scopes: process.env.SCOPES?.split(","),
+  appUrl: process.env.SHOPIFY_APP_URL || "",
+  authPathPrefix: "/auth",
+  sessionStorage: new PrismaSessionStorage(prisma),
+  distribution: AppDistribution.AppStore,
+  future: {
+    unstable_newEmbeddedAuthStrategy: true,
+    removeRest: true,
+  },
+  webhooks: {
+    PRODUCTS_DELETE: {
+      deliveryMethod: "http",
+      callbackUrl: "/webhooks/app/products-delete",
+      callback: async (topic, shop, body, webhookId) => {
+        // Xử lý logic khi sản phẩm bị xoá
+      },
+    },
+  },
+  ...(process.env.SHOP_CUSTOM_DOMAIN
+    ? { customShopDomains: [process.env.SHOP_CUSTOM_DOMAIN] }
+    : {}),
+});
+
+export default shopify;
+export const apiVersion = ApiVersion.January25;
+export const addDocumentResponseHeaders = shopify.addDocumentResponseHeaders;
+export const authenticate = shopify.authenticate;
+export const unauthenticated = shopify.unauthenticated;
+export const login = shopify.login;
+export const registerWebhooks = shopify.registerWebhooks;
+export const sessionStorage = shopify.sessionStorage;
 ```
 
-Using npm:
+- Đảm bảo mọi route API đều dùng middleware `authenticate` để kiểm tra session/token.
+- Token được lưu vào DB qua Prisma, đảm bảo bảo mật và dễ quản lý.
 
-```shell
-npm install
+---
+
+#### 2. Product Listing - Sử dụng Shopify Admin API
+
+**Gọi API lấy danh sách sản phẩm**
+
+```js
+import { json } from '@remix-run/node';
+import { authenticate } from '../shopify.server';
+
+export async function loader({ request }) {
+  const { admin, session } = await authenticate.admin(request);
+  const { shop, accessToken } = session;
+  if (!shop || !accessToken) {
+    throw new Error('Phiên không hợp lệ: Thiếu shop hoặc accessToken');
+  }
+  const response = await admin.graphql(
+    `#graphql
+    query($first: Int, $sortKey: ProductSortKeys, $reverse: Boolean) {
+      products(first: $first, sortKey: $sortKey, reverse: $reverse) {
+        edges {
+          node {
+            id
+            title
+            createdAt
+            featuredImage { url }
+          }
+          cursor
+        }
+        pageInfo {
+          hasNextPage
+          hasPreviousPage
+          startCursor
+          endCursor
+        }
+      }
+    }`,
+    {
+      variables: {
+        first: 5,
+        sortKey: 'TITLE',
+        reverse: false,
+      },
+    }
+  );
+
+  const { data, errors } = await response.json();
+  if (errors) throw new Error(errors.map((e) => e.message).join(', '));
+
+  return json({
+    products: data.products.edges.map((edge) => edge.node),
+    pageInfo: data.products.pageInfo,
+  });
+}
 ```
 
-Using pnpm:
+---
 
-```shell
-pnpm install
+**Hiển thị bảng danh sách (Polaris DataTable)**
+
+```js
+// app/components/ProductsTable.js
+import {
+  DataTable,
+  TextField,
+  Button,
+  Select,
+  InlineStack,
+  Page,
+  Card,
+  Link,
+  Badge,
+  Spinner,
+  Icon,
+} from '@shopify/polaris';
+import { SearchIcon, ArrowLeftIcon, ArrowRightIcon } from '@shopify/polaris-icons';
+import { useNavigate, useSubmit, useNavigation } from '@remix-run/react';
+import { useState, useEffect } from 'react';
+
+export function ProductsTable({ products, pageInfo, searchQuery, sortKey }) {
+  const navigate = useNavigate();
+  const submit = useSubmit();
+  const navigation = useNavigation();
+  const [searchValue, setSearchValue] = useState(searchQuery || '');
+  const [sortValue, setSortValue] = useState(sortKey || 'TITLE');
+
+  // Debounce search input
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (searchValue !== searchQuery) {
+        submit({ search: searchValue }, { replace: true });
+      }
+    }, 500);
+
+    return () => clearTimeout(timer);
+  }, [searchValue]);
+
+  // Handle sort change
+  const handleSortChange = (value) => {
+    setSortValue(value);
+    submit({ sort: value }, { replace: true });
+  };
+
+  // Handle pagination
+  const handlePagination = (direction) => {
+    const cursor = direction === 'next' ? pageInfo.endCursor : pageInfo.startCursor;
+    submit({ cursor, direction }, { replace: true });
+  };
+
+  // Prepare table rows
+  const rows = products.map((product) => [
+    product.featuredImage ? (
+      <img 
+        src={product.featuredImage.url} 
+        alt={product.title} 
+        width="40" 
+        style={{ borderRadius: '4px' }}
+      />
+    ) : (
+      <Badge tone="subdued">No image</Badge>
+    ),
+    <Link url={`/app/products/${product.id.split('/').pop()}`}>
+      {product.title}
+    </Link>,
+    <Badge tone={product.status === 'ACTIVE' ? 'success' : 'warning'}>
+      {product.status}
+    </Badge>,
+    `$${parseFloat(product.priceRange.minVariantPrice.amount).toFixed(2)}`,
+    new Date(product.createdAt).toLocaleDateString(),
+    <InlineStack gap="100">
+      <Button plain onClick={() => navigate(`/app/products/${product.id.split('/').pop()}`)}>
+        View
+      </Button>
+    </InlineStack>,
+  ]);
+
+  return (
+    <Page title="Products" fullWidth>
+      <Card>
+        <InlineStack gap="400" align="space-between" blockAlign="center">
+          <TextField
+            placeholder="Search products..."
+            value={searchValue}
+            onChange={setSearchValue}
+            autoComplete="off"
+            prefix={<Icon source={SearchIcon} />}
+          />
+          <Select
+            label="Sort by"
+            options={[
+              { label: 'Title A-Z', value: 'TITLE' },
+              { label: 'Title Z-A', value: 'TITLE_DESC' },
+              { label: 'Newest', value: 'CREATED_AT' },
+              { label: 'Oldest', value: 'CREATED_AT_ASC' },
+            ]}
+            value={sortValue}
+            onChange={handleSortChange}
+          />
+        </InlineStack>
+        {navigation.state === 'loading' ? (
+          <Spinner size="large" />
+        ) : (
+          <>
+            <DataTable
+              columnContentTypes={['text', 'text', 'text', 'text', 'text', 'text']}
+              headings={['Image', 'Title', 'Status', 'Price', 'Created', 'Actions']}
+              rows={rows}
+              footerContent={`Showing ${products.length} products`}
+            />
+            <InlineStack gap="400" align="center" blockAlign="center" padding="400">
+              <Button
+                icon={ArrowLeftIcon}
+                disabled={!pageInfo?.hasPreviousPage || navigation.state === 'loading'}
+                onClick={() => handlePagination('previous')}
+              >
+                Previous
+              </Button>
+              <Button
+                icon={ArrowRightIcon}
+                disabled={!pageInfo?.hasNextPage || navigation.state === 'loading'}
+                onClick={() => handlePagination('next')}
+              >
+                Next
+              </Button>
+            </InlineStack>
+          </>
+        )}
+      </Card>
+    </Page>
+  );
+}
 ```
 
-### Local Development
+---
 
-Using yarn:
+**Bonus:** Thêm phân trang / tìm kiếm / lọc sản phẩm
 
-```shell
-yarn dev
+```js
+export async function action({ request }) {
+  try {
+    const { admin } = await authenticate.admin(request);
+    const formData = await request.formData();
+
+    const searchQuery = formData.get('searchQuery') || '';
+    const cursor = formData.get('cursor') || null;
+    const actionType = formData.get('actionType');
+    const sortKey = formData.get('sortKey') || 'TITLE';
+    const reverse = formData.get('reverse') === 'true';
+    const variables = {
+      sortKey,
+      reverse,
+    };
+    
+    if (actionType === 'loadMore') {
+      variables.first = 5;
+      variables.after = cursor;
+    }
+    if (actionType === 'loadPrevious') {
+      variables.last = 5;
+      variables.before = cursor;
+    }
+    else {
+      variables.first = 5;
+    }
+    
+    if (searchQuery) {
+      variables.query = `title:*${searchQuery}*`;
+    }
+
+    const response = await admin.graphql(
+      `#graphql
+      query($first: Int, $last: Int, $after: String, $before: String, $query: String, $sortKey: ProductSortKeys, $reverse: Boolean) {
+        products(first: $first, last: $last, after: $after, before: $before, query: $query, sortKey: $sortKey, reverse: $reverse) {
+          edges {
+            node {
+              id
+              title
+              createdAt
+              featuredImage { url }
+            }
+            cursor
+          }
+          pageInfo {
+            hasNextPage
+            hasPreviousPage
+            startCursor
+            endCursor
+          }
+        }
+      }`,
+      {
+        variables
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(`API request failed with status ${response.status}: ${response.statusText}`);
+    }
+
+    let result;
+    try {
+      result = await response.json();
+    } catch (jsonError) {
+      throw new Error('Failed to parse API response as JSON');
+    }
+
+    const { data, errors } = result;
+    if (errors) {
+      throw new Error(errors.map((e) => e.message).join(', '));
+    }
+    if (!data || !data.products) {
+      throw new Error('No products data returned from API');
+    }
+
+    return json({
+      products: data.products.edges.map((edge) => edge.node),
+      pageInfo: data.products.pageInfo,
+      searchQuery,
+      actionType,
+      sortConfig: { key: sortKey, direction: reverse ? 'DESC' : 'ASC' },
+    });
+  } catch (error) {
+    console.error('Action error:', error);
+    return json({ error: error.message }, { status: 500 });
+  }
+}
+```
+Hình ảnh trang Product List:
+![alt text](public/productList.png)
+---
+
+### Xem chi tiết từng sản phẩm
+
+```js
+// app/routes/app.products.$id.js
+import { json } from '@remix-run/node';
+import { useLoaderData } from '@remix-run/react';
+import { authenticate } from '../shopify.server';
+import { Page, Card, Layout, Text, Button, Image } from '@shopify/polaris';
+
+export async function loader({ request, params }) {
+  const { admin } = await authenticate.admin(request);
+  const { id } = params;
+
+  const response = await admin.graphql(
+    `#graphql
+    query getProduct($id: ID!) {
+      product(id: $id) {
+        id
+        title
+        descriptionHtml
+        status
+        featuredImage {
+          url
+          altText
+        }
+        priceRange {
+          minVariantPrice {
+            amount
+            currencyCode
+          }
+        }
+        variants(first: 10) {
+          edges {
+            node {
+              id
+              title
+              price
+              inventoryQuantity
+            }
+          }
+        }
+      }
+    }`,
+    { variables: { id: `gid://shopify/Product/${id}` } }
+  );
+
+  const { data, errors } = await response.json();
+  if (errors) throw new Error(errors.map((e) => e.message).join(', '));
+
+  return json({ product: data.product });
+}
+
+export default function ProductDetail() {
+  const { product } = useLoaderData();
+  const navigate = useNavigate();
+
+  return (
+    <Page
+      title={product.title}
+      backAction={{ content: 'Back to products', onAction: () => navigate('/app/products') }}
+    >
+      <Layout>
+        <Layout.Section>
+          <Card>
+            {product.featuredImage && (
+              <Image
+                source={product.featuredImage.url}
+                alt={product.featuredImage.altText}
+                width="100%"
+                style={{ maxWidth: '500px' }}
+              />
+            )}
+            <Text variant="headingMd" as="h2">
+              {product.title}
+            </Text>
+            <Text variant="bodyMd" as="p">
+              Price: ${parseFloat(product.priceRange.minVariantPrice.amount).toFixed(2)}
+            </Text>
+            <div dangerouslySetInnerHTML={{ __html: product.descriptionHtml }} />
+          </Card>
+        </Layout.Section>
+        
+        <Layout.Section secondary>
+          <Card title="Variants">
+            {product.variants.edges.map(({ node: variant }) => (
+              <div key={variant.id} style={{ marginBottom: '16px' }}>
+                <Text variant="bodyMd" as="p" fontWeight="bold">
+                  {variant.title}
+                </Text>
+                <Text variant="bodyMd" as="p">
+                  Price: ${parseFloat(variant.price).toFixed(2)}
+                </Text>
+                <Text variant="bodyMd" as="p">
+                  Inventory: {variant.inventoryQuantity}
+                </Text>
+              </div>
+            ))}
+          </Card>
+        </Layout.Section>
+      </Layout>
+    </Page>
+  );
+}
+```
+Hình ảnh trang chi tiết:
+![alt text](public/Detail.png)
+### 3. Product Update - Giá & Tồn kho
+
+#### Form cập nhật giá giảm / tồn kho
+
+```jsx
+<fetcher.Form onSubmit={handleSubmit}>
+  <BlockStack gap="400">
+    <Text
+      variant="headingSm"
+      color={variant.selectedOptions.find(opt => opt.name === "Color")?.value || '#000000'}
+      as="h3"
+      fontWeight="medium"
+    >
+      {variant.title}
+    </Text>
+    <TextField
+      label="Price"
+      type="number"
+      value={price}
+      onChange={setPrice}
+      autoComplete="off"
+      step="0.01"
+      min="0"
+    />
+    <TextField
+      label="Available Quantity"
+      type="number"
+      value={inventory}
+      onChange={setInventory}
+      autoComplete="off"
+      min="0"
+    />
+    {variant.inventoryItem.inventoryLevels.edges.length > 0 && (
+      <Select
+        label="Location"
+        options={variant.inventoryItem.inventoryLevels.edges.map((edge) => ({
+          label: edge.node.location.name,
+          value: edge.node.location.id,
+        }))}
+        value={selectedLocationId}
+        onChange={handleLocationChange}
+      />
+    )}
+    <InlineStack gap="200">
+      <Button submit loading={fetcher.state === 'submitting'}>
+        Save
+      </Button>
+      <Button
+        onClick={handleCancelEdit}
+        disabled={fetcher.state === 'submitting'}
+      >
+        Cancel
+      </Button>
+    </InlineStack>
+  </BlockStack>
+</fetcher.Form>
+```
+hình ảnh form Update giá và tồn kho:
+![alt text](public/update.png)
+
+#### Validate đầu vào (middleware)
+
+```js
+try {
+  // Validate input
+  if (!variantId || !price || !inventory || !variantItemId || !inventoryQuantity || !location) {
+    throw new Error('Missing required fields');
+  }
+  if (isNaN(parseFloat(price))) {
+    throw new Error('Price must be a number');
+  }
+  if (
+    isNaN(parseInt(variantItemId)) ||
+    isNaN(parseInt(inventoryQuantity)) ||
+    isNaN(parseInt(location))
+  ) {
+    throw new Error('ID fields must be numbers');
+  }
+  if (isNaN(parseInt(inventory)) || parseInt(inventory) !== parseFloat(inventory)) {
+    throw new Error('Inventory must be a whole number and Integer');
+  }
+  // ... tiếp tục xử lý
+} catch (error) {
+  // Xử lý lỗi
+}
 ```
 
-Using npm:
+#### Gọi API Shopify để cập nhật
 
-```shell
-npm run dev
+**Cập nhật giá:**
+
+```js
+const priceUpdate = await admin.graphql(
+  `#graphql
+  mutation productVariantsBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+    productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+      product { id }
+      productVariants { id price }
+      userErrors { field message }
+    }
+  }`,
+  {
+    variables: {
+      productId: `gid://shopify/Product/${id}`,
+      variants: [
+        {
+          id: `gid://shopify/ProductVariant/${variantId.split('/').pop()}`,
+          price: parseFloat(price).toFixed(2),
+        },
+      ],
+    },
+  }
+);
 ```
 
-Using pnpm:
+**Cập nhật tồn kho:**
 
-```shell
-pnpm run dev
+```js
+const inventoryUpdate = await admin.graphql(
+  `#graphql
+  mutation InventorySet($input: InventorySetQuantitiesInput!) {
+    inventorySetQuantities(input: $input) {
+      inventoryAdjustmentGroup {
+        createdAt
+        reason
+        changes { name delta }
+      }
+      userErrors { field message }
+    }
+  }`,
+  {
+    variables: {
+      input: {
+        name: "available",
+        reason: "correction",
+        quantities: [
+          {
+            inventoryItemId: `gid://shopify/InventoryItem/${variantItemId.split('/').pop()}`,
+            locationId: `gid://shopify/Location/${location.split('/').pop()}`,
+            quantity: parseInt(inventory),
+            compareQuantity: parseInt(inventoryQuantity) || 0,
+          },
+        ],
+      },
+    },
+  }
+);
+
+const updateResult = await inventoryUpdate.json();
+if (updateResult.data.inventorySetQuantities.userErrors.length > 0) {
+  console.error("Inventory update errors:", updateResult.data.inventorySetQuantities.userErrors);
+}
+
+const priceResult = await priceUpdate.json();
+if (priceResult.errors || updateResult.errors) {
+  throw new Error('Failed to update product');
+}
+
+return json({ success: true });
 ```
 
-Press P to open the URL to your app. Once you click install, you can start development.
+#### Hiển thị Toast Polaris khi thành công / thất bại
 
-Local development is powered by [the Shopify CLI](https://shopify.dev/docs/apps/tools/cli). It logs into your partners account, connects to an app, provides environment variables, updates remote config, creates a tunnel and provides commands to generate extensions.
+```js
+useEffect(() => {
+  if (fetcher.state === 'idle' && fetcher.data?.success) {
+    setActive(true);
+    setEditingVariant(null);
+    revalidator.revalidate();
+  } else if (fetcher.state === 'idle' && fetcher.data?.error) {
+    setActive(true);
+  }
+}, [fetcher.state, fetcher.data]);
 
-### Authenticating and querying data
+{active && (
+  <Toast
+    content={fetcher.data?.success ? 'Cập nhật thành công' : fetcher.data?.error}
+    onDismiss={toggleActive}
+  />
+)}
+```
 
-To authenticate and query data you can use the `shopify` const that is exported from `/app/shopify.server.js`:
+> **Lưu ý:** Đặt Toast trong page và bọc page bằng `Frame` của Polaris để Toast hiển thị đúng.
+
+Hình ảnh sau khi update thành công:
+![alt text](public/updateSuccess.png)
+### 4. Theme Interaction - App Block
+
+Trong app này, sử dụng **App Block** thay vì ScriptTag để tương tác với theme.
+
+#### 1. Tạo file Liquid cho App Block
+
+Tạo file: `extensions/product-promotion-block/blocks/product-promotion.liquid`
+
+**Định nghĩa App Block:**
+
+```liquid
+{% schema %}
+{
+  "name": "Product Promotion",
+  "target": "section",
+  "settings": [
+    {
+      "type": "product",
+      "id": "product",
+      "label": "Select Product"
+    }
+  ]
+}
+{% endschema %}
+```
+
+#### 2. Nội dung hiển thị trong App Block
+
+Hiển thị:
+
+- Giá gốc
+- Giá khuyến mãi (lấy động từ API app)
+- Thông điệp "Còn X sản phẩm trong kho"
+- Nút cập nhật dữ liệu (gọi API riêng của app)
+
+```liquid
+<div id="product-promotion" class="product-promotion-container">
+  <div class="price-info">
+    <p class="original-price">Giá gốc: <span>{{ product.price | money }}</span></p>
+    <p class="promotion-price">Giá khuyến mãi: <span id="promotion-price">Đang tải...</span></p>
+    <p class="inventory-info">Còn <span id="inventory">Đang tải...</span> sản phẩm trong kho</p>
+  </div>
+  <button onclick="fetchDynamicData()" class="update-button">
+    <span class="button-text">Cập nhật dữ liệu</span>
+    <span class="loading-spinner" style="display: none;">⏳</span>
+  </button>
+</div>
+
+<script>
+  function fetchDynamicData() {
+    const productId = '{{ product.id }}';
+    const button = document.querySelector('.update-button');
+    const buttonText = document.querySelector('.button-text');
+    const spinner = document.querySelector('.loading-spinner');
+
+    // Cập nhật trạng thái nút khi bắt đầu gọi API
+    if (button && buttonText && spinner) {
+      button.disabled = true;
+      buttonText.style.display = 'none';
+      spinner.style.display = 'inline';
+    }
+
+    fetch('https://positive-moderate-environmental-blocking.trycloudflare.com/api/product-promotion?productId=' + productId, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    })
+      .then(res => {
+        if (!res.ok) {
+          throw new Error('Network response was not ok: ' + res.status);
+        }
+        return res.json();
+      })
+      .then(data => {
+        document.getElementById('promotion-price').innerText = data.promotionPrice || 'Chưa có';
+        document.getElementById('inventory').innerText = data.inventory || '0';
+      })
+      .catch(err => {
+        console.error('Error:', err);
+        document.getElementById('promotion-price').innerText = 'Lỗi';
+        document.getElementById('inventory').innerText = 'Lỗi';
+      })
+      .finally(() => {
+        // Khôi phục trạng thái nút sau khi API hoàn tất
+        if (button && buttonText && spinner) {
+          button.disabled = false;
+          buttonText.style.display = 'inline';
+          spinner.style.display = 'none';
+        }
+      });
+  }
+  fetchDynamicData();
+</script>
+```
+
+#### 3. API riêng cho App Block
+
+Tạo file: `app/routes/api.product-promotion.jsx`
+
+```js
+import { json } from '@remix-run/node';
+
+export async function loader({ request }) {
+  try {
+    const url = new URL(request.url);
+    const productId = url.searchParams.get('productId');
+    console.log('Request received:', request.url, 'Product ID:', productId);
+
+    if (!productId) {
+      console.log('Invalid or missing productId, returning 400');
+      return json({ error: 'Invalid or missing productId' }, { status: 400 });
+    }
+
+    // Lấy dữ liệu động từ DB hoặc tính toán, ví dụ mẫu:
+    const promotionData = {
+      promotionPrice: '99 đ',
+      inventory: 50,
+    };
+    console.log('Returning data:', promotionData);
+
+    return json(promotionData, {
+      headers: {
+        'Access-Control-Allow-Origin': 'https://quang-linh-ngh-an.myshopify.com',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Shopify-Hmac-Sha256, X-Shopify-Shop-Domain',
+      }
+    });
+  } catch (error) {
+    console.error('Error in loader:', error);
+    return json({ error: 'Internal server error' }, { status: 500 });
+  }
+}
+```
+
+**Lưu ý:**  
+- Không để lộ thông tin nhạy cảm (API secret) trên client-side.
+- Đảm bảo CORS đúng domain Shopify store.
+- Có thể mở rộng API để lấy dữ liệu động thực tế từ DB hoặc Shopify API.
+
+Hình ảnh App Block được nhúng vào theme:
+![alt text](public/AppBlock.png)
+### 5. Webhook - Product Delete
+
+#### Đăng ký webhook PRODUCTS_DELETE
+
+Bạn có thể đăng ký webhook bằng GraphiQL với mutation sau:
+
+```graphql
+mutation webhookSubscriptionCreate($topic: WebhookSubscriptionTopic!, $webhookSubscription: WebhookSubscriptionInput!) {
+  webhookSubscriptionCreate(topic: $topic, webhookSubscription: $webhookSubscription) {
+    webhookSubscription {
+      id
+      topic
+      filter
+      format
+      endpoint {
+        __typename
+        ... on WebhookHttpEndpoint {
+          callbackUrl
+        }
+      }
+    }
+    userErrors {
+      field
+      message
+    }
+  }
+}
+```
+
+**Biến truyền vào:**
+
+```json
+{
+  "topic": "PRODUCTS_DELETE",
+  "webhookSubscription": {
+    "callbackUrl": "https://means-status-drag-ipaq.trycloudflare.com/webhooks/app/products-delete",
+    "format": "JSON"
+  }
+}
+```
+
+#### Xử lý khi sản phẩm bị xoá
+
+Khi nhận được webhook, bạn có thể ghi log ra file hoặc lưu vào database. Ví dụ ghi log vào file:
+
+```js
+import { json } from '@remix-run/node';
+import fs from 'fs';
+import path from 'path';
+
+export async function action({ request }) {
+  try {
+    const body = await request.json();
+    const productId = body.webhookId || body.id;
+    if (!productId) {
+      return json({ error: 'Missing productId' }, { status: 400 });
+    }
+
+    // Ghi log vào file
+    const logMessage = `Product deleted: ${productId} at ${new Date().toISOString()}\n`;
+    const logsDir = path.join(process.cwd(), 'logs');
+    if (!fs.existsSync(logsDir)) {
+      fs.mkdirSync(logsDir, { recursive: true });
+    }
+    const logFilePath = path.join(logsDir, 'product-delete.log');
+    fs.appendFileSync(logFilePath, logMessage);
+
+    return json({ success: true, productId });
+  } catch (error) {
+    // Ghi lỗi vào file
+    const logsDir = path.join(process.cwd(), 'logs');
+    if (!fs.existsSync(logsDir)) {
+      fs.mkdirSync(logsDir, { recursive: true });
+    }
+    const errorLogMessage = `Webhook error: ${error.message} at ${new Date().toISOString()}\n`;
+    const errorLogFilePath = path.join(logsDir, 'product-delete-error.log');
+    fs.appendFileSync(errorLogFilePath, errorLogMessage);
+
+    return json({ error: String(error) }, { status: 500 });
+  }
+}
+```
+
+> **Log sẽ được ghi vào file:** `logs/product-delete.log`
+![alt text](public/logDelete.png)
+## 6. Dashboard thống kê (Polaris)
+
+Trang Dashboard sử dụng Polaris để hiển thị các thống kê tổng quan về sản phẩm trong app. Sử dụng Chart.js để vẽ biểu đồ minh họa.
+
+**Các thống kê cần lấy:**
+- Số sản phẩm đang có trong app
+- Tổng tồn kho các sản phẩm
+- Tổng sản phẩm đang giảm giá
+
+**Ví dụ API loader:**
 
 ```js
 export async function loader({ request }) {
-  const { admin } = await shopify.authenticate.admin(request);
+  const { admin } = await authenticate.admin(request);
 
-  const response = await admin.graphql(`
-    {
-      products(first: 25) {
-        nodes {
-          title
-          description
+  try {
+    const response = await admin.graphql(
+      `#graphql
+      query getProducts {
+        products(first: 250) {
+          edges {
+            node {
+              id
+              title
+              totalInventory
+              variants(first: 250) {
+                edges {
+                  node {
+                    id
+                    price
+                    compareAtPrice
+                  }
+                }
+              }
+            }
+          }
         }
+      }`
+    );
+
+    const { data, errors } = await response.json();
+    if (errors) throw new Error(errors.map((e) => e.message).join(', '));
+
+    const products = data.products.edges.map(edge => edge.node);
+
+    const totalProducts = products.length;
+    const totalProductsWithVariants = products.reduce((sum, product) => sum + (product.variants.edges.length || 0), 0);
+    const totalInventory = products.reduce((sum, product) => sum + (product.totalInventory || 0), 0);
+    const productsOnSale = products.filter(product =>
+      product.variants.edges.some(variant => {
+        const price = parseFloat(variant.node.price);
+        const compareAtPrice = parseFloat(variant.node.compareAtPrice || '0');
+        return compareAtPrice > 0 && price < compareAtPrice;
+      })
+    ).length;
+    const productsOnSalevariant = products.reduce((sum, product) => {
+      return sum + product.variants.edges.filter(variant => {
+        const price = parseFloat(variant.node.price);
+        const compareAtPrice = parseFloat(variant.node.compareAtPrice || '0');
+        return compareAtPrice > 0 && price < compareAtPrice;
+      }).length;
+    }, 0);
+
+    return json({
+      stats: {
+        totalProducts,
+        totalProductsWithVariants,
+        totalInventory,
+        productsOnSale,
+        productsOnSalevariant,
+      },
+    });
+  } catch (error) {
+    console.error('Dashboard error:', error);
+    return json({ error: error.message }, { status: 500 });
+  }
+}
+```
+
+**Giao diện Dashboard (ví dụ):**
+
+- Hiển thị các số liệu thống kê bằng Card Polaris.
+- Sử dụng Chart.js để vẽ biểu đồ tròn hoặc cột minh họa số lượng sản phẩm, tồn kho, sản phẩm giảm giá.
+
+```jsx
+import { Card, Layout, Text } from '@shopify/polaris';
+import { Bar, Pie } from 'react-chartjs-2';
+
+export default function Dashboard({ stats }) {
+  const chartData = {
+    labels: ['Tổng sản phẩm', 'Tổng tồn kho', 'Sản phẩm giảm giá'],
+    datasets: [
+      {
+        label: 'Thống kê',
+        data: [stats.totalProducts, stats.totalInventory, stats.productsOnSale],
+        backgroundColor: ['#5c6ac4', '#47c1bf', '#f49342'],
+      },
+    ],
+  };
+
+  return (
+    <Layout>
+      <Layout.Section>
+        <Card title="Thống kê tổng quan">
+          <Text>Số sản phẩm: {stats.totalProducts}</Text>
+          <Text>Tổng tồn kho: {stats.totalInventory}</Text>
+          <Text>Sản phẩm đang giảm giá: {stats.productsOnSale}</Text>
+        </Card>
+      </Layout.Section>
+      <Layout.Section>
+        <Card title="Biểu đồ minh họa">
+          <Bar data={chartData} />
+        </Card>
+      </Layout.Section>
+    </Layout>
+  );
+}
+```
+#### Hình ảnh trang thống kê:
+![alt text](public/Stats.png)
+---
+
+## 7. Error Handling & Security
+
+### Middleware kiểm tra token
+
+- App Remix Shopify đã tích hợp sẵn middleware kiểm tra token cho mọi API route.
+
+### Error Boundary cho Remix Route
+
+Thêm ErrorBoundary vào `root.jsx` để xử lý lỗi toàn cục:
+
+```js
+import { json } from '@remix-run/node';
+
+export const loader = async ({ request }) => {
+  return json({ title: 'Product Promotion & Stock Manager' });
+};
+
+export function ErrorBoundary({ error }) {
+  console.error('ErrorBoundary caught:', error);
+  return (
+    <html>
+      <head>
+        <meta charSet="utf-8" />
+        <meta name="viewport" content="width=device-width,initial-scale=1" />
+        <title>Error-Product Promotion & Stock Manager</title>
+        <Links />
+      </head>
+      <body>
+        <div style={{ padding: '20px', textAlign: 'center' }}>
+          <h1>Có lỗi xảy ra</h1>
+          <p>{error?.message || 'Đã có lỗi không xác định. Vui lòng thử lại sau.'}</p>
+          <Link url="/app">Quay lại trang chủ</Link>
+        </div>
+        <Scripts />
+      </body>
+    </html>
+  );
+}
+```
+#### Hình ảnh khi có lỗi được Error Boundary bắt lỗi:
+ ![alt text](public/Error.png)
+### Sanitize input tránh XSS/Injection
+
+Đã thực hiện sanitize input trong file `api.product-promotion.jsx`:
+
+```js
+import { json } from '@remix-run/node';
+import { authenticateToken } from '../middleware/authenticateToken';
+import sanitizeHtml from 'sanitize-html';
+
+export async function loader({ request }) {
+  // Handle OPTIONS preflight request
+  if (request.method === 'OPTIONS') {
+    return new Response(null, {
+      status: 200,
+      headers: {
+        'Access-Control-Allow-Origin': 'https://quang-linh-ngh-an.myshopify.com',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Shopify-Hmac-Sha256, X-Shopify-Shop-Domain',
+      },
+    });
+  }
+  try {
+    // Kiểm tra token/HMAC
+    await authenticateToken(request);
+
+    const url = new URL(request.url);
+    let productId = url.searchParams.get('productId');
+    console.log('Request received:', request.url, 'Product ID:', productId);
+
+    // Sanitize productId (chỉ cho phép số)
+    productId = productId ? productId.replace(/[^0-9]/g, '') : null;
+    if (!productId) {
+      console.log('Invalid or missing productId, returning 400');
+      return json({ error: 'Invalid or missing productId' }, { status: 400 });
+    }
+
+    const promotionData = {
+      promotionPrice: '99 đ',
+      inventory: 50,
+    };
+    console.log('Returning data:', promotionData);
+
+    // Sanitize dữ liệu đầu ra (nếu cần hiển thị HTML)
+    const sanitizedData = {
+      promotionPrice: sanitizeHtml(promotionData.promotionPrice, {
+        allowedTags: [],
+        allowedAttributes: {},
+      }),
+      inventory: promotionData.inventory,
+    };
+    return json(sanitizedData, {
+      headers: {
+        'Access-Control-Allow-Origin': 'https://quang-linh-ngh-an.myshopify.com',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Shopify-Hmac-Sha256, X-Shopify-Shop-Domain',
       }
-    }`);
-
-  const {
-    data: {
-      products: { nodes },
-    },
-  } = await response.json();
-
-  return nodes;
+    });
+  } catch (error) {
+    console.error('Error in loader:', error);
+    return json({ error: error.message || 'Internal Server Error' }, { status: error.status || 500 });
+  }
 }
 ```
 
-This template comes preconfigured with examples of:
 
-1. Setting up your Shopify app in [/app/shopify.server.ts](https://github.com/Shopify/shopify-app-template-remix/blob/main/app/shopify.server.ts)
-2. Querying data using Graphql. Please see: [/app/routes/app.\_index.tsx](https://github.com/Shopify/shopify-app-template-remix/blob/main/app/routes/app._index.tsx).
-3. Responding to mandatory webhooks in [/app/routes/webhooks.tsx](https://github.com/Shopify/shopify-app-template-remix/blob/main/app/routes/webhooks.tsx)
+**Lưu ý:**  
+- Luôn kiểm tra và sanitize dữ liệu đầu vào/đầu ra để tránh XSS, injection.
+- Đảm bảo CORS đúng domain Shopify store.
+- Middleware kiểm tra token/HMAC cho mọi API endpoint.
 
-Please read the [documentation for @shopify/shopify-app-remix](https://www.npmjs.com/package/@shopify/shopify-app-remix#authenticating-admin-requests) to understand what other API's are available.
-
-## Deployment
-
-### Application Storage
-
-This template uses [Prisma](https://www.prisma.io/) to store session data, by default using an [SQLite](https://www.sqlite.org/index.html) database.
-The database is defined as a Prisma schema in `prisma/schema.prisma`.
-
-This use of SQLite works in production if your app runs as a single instance.
-The database that works best for you depends on the data your app needs and how it is queried.
-You can run your database of choice on a server yourself or host it with a SaaS company.
-Here’s a short list of databases providers that provide a free tier to get started:
-
-| Database   | Type             | Hosters                                                                                                                                                                                                                               |
-| ---------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| MySQL      | SQL              | [Digital Ocean](https://www.digitalocean.com/products/managed-databases-mysql), [Planet Scale](https://planetscale.com/), [Amazon Aurora](https://aws.amazon.com/rds/aurora/), [Google Cloud SQL](https://cloud.google.com/sql/docs/mysql) |
-| PostgreSQL | SQL              | [Digital Ocean](https://www.digitalocean.com/products/managed-databases-postgresql), [Amazon Aurora](https://aws.amazon.com/rds/aurora/), [Google Cloud SQL](https://cloud.google.com/sql/docs/postgres)                                   |
-| Redis      | Key-value        | [Digital Ocean](https://www.digitalocean.com/products/managed-databases-redis), [Amazon MemoryDB](https://aws.amazon.com/memorydb/)                                                                                                        |
-| MongoDB    | NoSQL / Document | [Digital Ocean](https://www.digitalocean.com/products/managed-databases-mongodb), [MongoDB Atlas](https://www.mongodb.com/atlas/database)                                                                                                  |
-
-To use one of these, you can use a different [datasource provider](https://www.prisma.io/docs/reference/api-reference/prisma-schema-reference#datasource) in your `schema.prisma` file, or a different [SessionStorage adapter package](https://github.com/Shopify/shopify-api-js/blob/main/packages/shopify-api/docs/guides/session-storage.md).
-
-### Build
-
-Remix handles building the app for you, by running the command below with the package manager of your choice:
-
-Using yarn:
-
-```shell
-yarn build
-```
-
-Using npm:
-
-```shell
-npm run build
-```
-
-Using pnpm:
-
-```shell
-pnpm run build
-```
-
-## Hosting
-
-When you're ready to set up your app in production, you can follow [our deployment documentation](https://shopify.dev/docs/apps/deployment/web) to host your app on a cloud provider like [Heroku](https://www.heroku.com/) or [Fly.io](https://fly.io/).
-
-When you reach the step for [setting up environment variables](https://shopify.dev/docs/apps/deployment/web#set-env-vars), you also need to set the variable `NODE_ENV=production`.
-
-### Hosting on Vercel
-
-Using the Vercel Preset is recommended when hosting your Shopify Remix app on Vercel. You'll also want to ensure imports that would normally come from `@remix-run/node` are imported from `@vercel/remix` instead. Learn more about hosting Remix apps on Vercel [here](https://vercel.com/docs/frameworks/remix).
-
-```diff
-// vite.config.ts
-import { vitePlugin as remix } from "@remix-run/dev";
-import { defineConfig, type UserConfig } from "vite";
-import tsconfigPaths from "vite-tsconfig-paths";
-+ import { vercelPreset } from '@vercel/remix/vite';
-
-installGlobals();
-
-export default defineConfig({
-  plugins: [
-    remix({
-      ignoredRouteFiles: ["**/.*"],
-+     presets: [vercelPreset()],
-    }),
-    tsconfigPaths(),
-  ],
-});
-```
-
-## Troubleshooting
-
-### Database tables don't exist
-
-If you get this error:
-
-```
-The table `main.Session` does not exist in the current database.
-```
-
-You need to create the database for Prisma. Run the `setup` script in `package.json` using your preferred package manager.
-
-### Navigating/redirecting breaks an embedded app
-
-Embedded Shopify apps must maintain the user session, which can be tricky inside an iFrame. To avoid issues:
-
-1. Use `Link` from `@remix-run/react` or `@shopify/polaris`. Do not use `<a>`.
-2. Use the `redirect` helper returned from `authenticate.admin`. Do not use `redirect` from `@remix-run/node`
-3. Use `useSubmit` or `<Form/>` from `@remix-run/react`. Do not use a lowercase `<form/>`.
-
-This only applies if your app is embedded, which it will be by default.
-
-### Non Embedded
-
-Shopify apps are best when they are embedded in the Shopify Admin, which is how this template is configured. If you have a reason to not embed your app please make the following changes:
-
-1. Ensure `embedded = false` is set in [shopify.app.toml`](./shopify.app.toml). [Docs here](https://shopify.dev/docs/apps/build/cli-for-apps/app-configuration#global).
-2. Pass `isEmbeddedApp: false` to `shopifyApp()` in `./app/shopify.server.js|ts`.
-3. Change the `isEmbeddedApp` prop to `isEmbeddedApp={false}` for the `AppProvider` in `/app/routes/app.jsx|tsx`.
-4. Remove the `@shopify/app-bridge-react` dependency from [package.json](./package.json) and `vite.config.ts|js`.
-5. Remove anything imported from `@shopify/app-bridge-react`.  For example: `NavMenu`, `TitleBar` and `useAppBridge`.
-
-### OAuth goes into a loop when I change my app's scopes
-
-If you change your app's scopes and authentication goes into a loop and fails with a message from Shopify that it tried too many times, you might have forgotten to update your scopes with Shopify.
-To do that, you can run the `deploy` CLI command.
-
-Using yarn:
-
-```shell
-yarn deploy
-```
-
-Using npm:
-
-```shell
-npm run deploy
-```
-
-Using pnpm:
-
-```shell
-pnpm run deploy
-```
-
-### My shop-specific webhook subscriptions aren't updated
-
-If you are registering webhooks in the `afterAuth` hook, using `shopify.registerWebhooks`, you may find that your subscriptions aren't being updated.  
-
-Instead of using the `afterAuth` hook, the recommended approach is to declare app-specific webhooks in the `shopify.app.toml` file.  This approach is easier since Shopify will automatically update changes to webhook subscriptions every time you run `deploy` (e.g: `npm run deploy`).  Please read these guides to understand more:
-
-1. [app-specific vs shop-specific webhooks](https://shopify.dev/docs/apps/build/webhooks/subscribe#app-specific-subscriptions)
-2. [Create a subscription tutorial](https://shopify.dev/docs/apps/build/webhooks/subscribe/get-started?framework=remix&deliveryMethod=https)
-
-If you do need shop-specific webhooks, please keep in mind that the package calls `afterAuth` in 2 scenarios:
-
-- After installing the app
-- When an access token expires
-
-During normal development, the app won't need to re-authenticate most of the time, so shop-specific subscriptions aren't updated. To force your app to update the subscriptions, you can uninstall and reinstall it in your development store. That will force the OAuth process and call the `afterAuth` hook.
-
-### Admin created webhook failing HMAC validation
-
-Webhooks subscriptions created in the [Shopify admin](https://help.shopify.com/en/manual/orders/notifications/webhooks) will fail HMAC validation. This is because the webhook payload is not signed with your app's secret key.  There are 2 solutions:
-
-1. Use [app-specific webhooks](https://shopify.dev/docs/apps/build/webhooks/subscribe#app-specific-subscriptions) defined in your toml file instead (recommended)
-2. Create [webhook subscriptions](https://shopify.dev/docs/api/shopify-app-remix/v1/guide-webhooks) using the `shopifyApp` object.
-
-Test your webhooks with the [Shopify CLI](https://shopify.dev/docs/apps/tools/cli/commands#webhook-trigger) or by triggering events manually in the Shopify admin(e.g. Updating the product title to trigger a `PRODUCTS_UPDATE`).
-
-### Incorrect GraphQL Hints
-
-By default the [graphql.vscode-graphql](https://marketplace.visualstudio.com/items?itemName=GraphQL.vscode-graphql) extension for VS Code will assume that GraphQL queries or mutations are for the [Shopify Admin API](https://shopify.dev/docs/api/admin). This is a sensible default, but it may not be true if:
-
-1. You use another Shopify API such as the storefront API.
-2. You use a third party GraphQL API.
-
-in this situation, please update the [.graphqlrc.ts](https://github.com/Shopify/shopify-app-template-remix/blob/main/.graphqlrc.ts) config.
-
-### First parameter has member 'readable' that is not a ReadableStream.
-
-See [hosting on Vercel](#hosting-on-vercel).
-
-### Admin object undefined on webhook events triggered by the CLI
-
-When you trigger a webhook event using the Shopify CLI, the `admin` object will be `undefined`. This is because the CLI triggers an event with a valid, but non-existent, shop. The `admin` object is only available when the webhook is triggered by a shop that has installed the app.
-
-Webhooks triggered by the CLI are intended for initial experimentation testing of your webhook configuration. For more information on how to test your webhooks, see the [Shopify CLI documentation](https://shopify.dev/docs/apps/tools/cli/commands#webhook-trigger).
-
-### Using Defer & await for streaming responses
-
-To test [streaming using defer/await](https://remix.run/docs/en/main/guides/streaming) during local development you'll need to use the Shopify CLI slightly differently:
-
-1. First setup ngrok: https://ngrok.com/product/secure-tunnels
-2. Create an ngrok tunnel on port 8080: `ngrok http 8080`.
-3. Copy the forwarding address. This should be something like: `https://f355-2607-fea8-bb5c-8700-7972-d2b5-3f2b-94ab.ngrok-free.app`
-4. In a separate terminal run `yarn shopify app dev --tunnel-url=TUNNEL_URL:8080` replacing `TUNNEL_URL` for the address you copied in step 3.
-
-By default the CLI uses a cloudflare tunnel. Unfortunately it cloudflare tunnels wait for the Response stream to finish, then sends one chunk.
-
-This will not affect production, since tunnels are only for local development.
-
-### Using MongoDB and Prisma
-
-By default this template uses SQLlite as the database. It is recommended to move to a persisted database for production. If you choose to use MongoDB, you will need to make some modifications to the schema and prisma configuration. For more information please see the [Prisma MongoDB documentation](https://www.prisma.io/docs/orm/overview/databases/mongodb).
-
-Alternatively you can use a MongDB database directly with the [MongoDB session storage adapter](https://github.com/Shopify/shopify-app-js/tree/main/packages/apps/session-storage/shopify-app-session-storage-mongodb).
-
-#### Mapping the id field
-
-In MongoDB, an ID must be a single field that defines an @id attribute and a @map("\_id") attribute.
-The prisma adapter expects the ID field to be the ID of the session, and not the \_id field of the document.
-
-To make this work you can add a new field to the schema that maps the \_id field to the id field. For more information see the [Prisma documentation](https://www.prisma.io/docs/orm/prisma-schema/data-model/models#defining-an-id-field)
-
-```prisma
-model Session {
-  session_id  String    @id @default(auto()) @map("_id") @db.ObjectId
-  id          String    @unique
-...
-}
-```
-
-#### Error: The "mongodb" provider is not supported with this command
-
-MongoDB does not support the [prisma migrate](https://www.prisma.io/docs/orm/prisma-migrate/understanding-prisma-migrate/overview) command. Instead, you can use the [prisma db push](https://www.prisma.io/docs/orm/reference/prisma-cli-reference#db-push) command and update the `shopify.web.toml` file with the following commands. If you are using MongoDB please see the [Prisma documentation](https://www.prisma.io/docs/orm/overview/databases/mongodb) for more information.
-
-```toml
-[commands]
-predev = "npx prisma generate && npx prisma db push"
-dev = "npm exec remix vite:dev"
-```
-
-#### Prisma needs to perform transactions, which requires your mongodb server to be run as a replica set
-
-See the [Prisma documentation](https://www.prisma.io/docs/getting-started/setup-prisma/start-from-scratch/mongodb/connect-your-database-node-mongodb) for connecting to a MongoDB database.
-
-### I want to use Polaris v13.0.0 or higher
-
-Currently, this template is set up to work on node v18.20 or higher. However, `@shopify/polaris` is limited to v12 because v13 can only run on node v20+.
-
-You don't have to make any changes to the code in order to be able to upgrade Polaris to v13, but you'll need to do the following:
-
-- Upgrade your node version to v20.10 or higher.
-- Update your `Dockerfile` to pull `FROM node:20-alpine` instead of `node:18-alpine`
-
-### "nbf" claim timestamp check failed
-
-This error will occur of the `nbf` claim timestamp check failed. This is because the JWT token is expired.
-If you  are consistently getting this error, it could be that the clock on your machine is not in sync with the server.
-
-To fix this ensure you have enabled `Set time and date automatically` in the `Date and Time` settings on your computer.
-
-## Benefits
-
-Shopify apps are built on a variety of Shopify tools to create a great merchant experience.
-
-<!-- TODO: Uncomment this after we've updated the docs -->
-<!-- The [create an app](https://shopify.dev/docs/apps/getting-started/create) tutorial in our developer documentation will guide you through creating a Shopify app using this template. -->
-
-The Remix app template comes with the following out-of-the-box functionality:
-
-- [OAuth](https://github.com/Shopify/shopify-app-js/tree/main/packages/shopify-app-remix#authenticating-admin-requests): Installing the app and granting permissions
-- [GraphQL Admin API](https://github.com/Shopify/shopify-app-js/tree/main/packages/shopify-app-remix#using-the-shopify-admin-graphql-api): Querying or mutating Shopify admin data
-- [Webhooks](https://github.com/Shopify/shopify-app-js/tree/main/packages/shopify-app-remix#authenticating-webhook-requests): Callbacks sent by Shopify when certain events occur
-- [AppBridge](https://shopify.dev/docs/api/app-bridge): This template uses the next generation of the Shopify App Bridge library which works in unison with previous versions.
-- [Polaris](https://polaris.shopify.com/): Design system that enables apps to create Shopify-like experiences
-
-## Tech Stack
-
-This template uses [Remix](https://remix.run). The following Shopify tools are also included to ease app development:
-
-- [Shopify App Remix](https://shopify.dev/docs/api/shopify-app-remix) provides authentication and methods for interacting with Shopify APIs.
-- [Shopify App Bridge](https://shopify.dev/docs/apps/tools/app-bridge) allows your app to seamlessly integrate your app within Shopify's Admin.
-- [Polaris React](https://polaris.shopify.com/) is a powerful design system and component library that helps developers build high quality, consistent experiences for Shopify merchants.
-- [Webhooks](https://github.com/Shopify/shopify-app-js/tree/main/packages/shopify-app-remix#authenticating-webhook-requests): Callbacks sent by Shopify when certain events occur
-- [Polaris](https://polaris.shopify.com/): Design system that enables apps to create Shopify-like experiences
-
-## Resources
-
-- [Remix Docs](https://remix.run/docs/en/v1)
-- [Shopify App Remix](https://shopify.dev/docs/api/shopify-app-remix)
-- [Introduction to Shopify apps](https://shopify.dev/docs/apps/getting-started)
-- [App authentication](https://shopify.dev/docs/apps/auth)
-- [Shopify CLI](https://shopify.dev/docs/apps/tools/cli)
-- [App extensions](https://shopify.dev/docs/apps/app-extensions/list)
-- [Shopify Functions](https://shopify.dev/docs/api/functions)
-- [Getting started with internationalizing your app](https://shopify.dev/docs/apps/best-practices/internationalization/getting-started)

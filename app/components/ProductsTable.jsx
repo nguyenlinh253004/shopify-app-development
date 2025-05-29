@@ -10,6 +10,7 @@ import {
   Card,
   Link,
   Badge,
+  SkeletonBodyText,
 } from '@shopify/polaris';
 import { useDebounce } from 'use-debounce';
 
@@ -54,7 +55,7 @@ export function ProductsTable({
         method: 'post',
       });
     }
-  }, [debouncedSearchTerm, sortConfig, submit, initialSearchTerm, initialSortConfig]);
+  }, [debouncedSearchTerm, sortConfig, submit, initialSearchTerm]);
 
   useEffect(() => {
     setProducts(initialProducts || []);
@@ -68,7 +69,7 @@ export function ProductsTable({
     if (initialSortConfig) {
       setSortConfig(initialSortConfig);
     }
-  }, [initialProducts, initialPageInfo, initialError, initialSortConfig]);
+  }, [initialProducts, initialPageInfo, initialError]);
 
   const isLoading = navigation.state === 'submitting';
 
@@ -143,14 +144,22 @@ export function ProductsTable({
         </InlineStack>
 
         {isLoading && <Spinner size="small" />}
-
         <div style={{ marginTop: '20px' }}>
+        {isLoading? 
+          <DataTable
+            columnContentTypes={['text', 'text', 'text', 'text', 'text']}
+            headings={['Image', 'ID', 'Title', 'Created At', 'Actions']}
+            rows={[[ <SkeletonBodyText />, <SkeletonBodyText />, <SkeletonBodyText />, <SkeletonBodyText />, <SkeletonBodyText />]]}
+          />
+          :( 
           <DataTable
             columnContentTypes={['text', 'text', 'text', 'text', 'text']}
             headings={['Image', 'ID', 'Title', 'Created At', 'Actions']}
             rows={rows}
             footerContent={`Showing ${products.length} of ${products.length} results`}
           />
+          ) }
+        
 
           <InlineStack gap="400" align="center" blockAlign="center" padding="400">
             <Form method="post">

@@ -30,3 +30,9 @@ model Session {
   collaborator  Boolean?  @default(false)
   emailVerified Boolean?  @default(false)
 }
+model ProductDeleteLog {
+  id         Int      @id @default(autoincrement())
+  productId  String
+  deletedAt  DateTime @default(now())
+  error      String?
+}
